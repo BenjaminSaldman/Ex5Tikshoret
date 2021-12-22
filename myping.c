@@ -1,188 +1,261 @@
-/* myping.c
- *
- * Copyright (c) 2000 Sean Walton and Macmillan Publishers.  Use may be in
- * whole or in part in accordance to the General Public License (GPL).
- *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+// icmp.cpp
+// Robert Iakobashvili for Ariel uni, license BSD/MIT/Apache
+// 
+// Sending ICMP Echo Requests using Raw-sockets.
+//
+
+#include <stdio.h>
+
+#if defined _WIN32
+// See at https://msdn.microsoft.com/en-us/library/windows/desktop/ms740506(v=vs.85).aspx
+// link with Ws2_32.lib
+#pragma comment(lib,"Ws2_32.lib")
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+/*
+* This was a surpise to me...  This stuff is not defined anywhere under MSVC.
+* They were taken from the MSDN ping.c program and modified.
 */
 
-/*****************************************************************************/
-/*** myping.c                                                              ***/
-/***                                                                       ***/
-/*** Use the ICMP protocol to request "echo" from destination.             ***/
-/*****************************************************************************/
+#define ICMP_ECHO       8
+#define ICMP_ECHOREPLY  0
+#define IP_MAXPACKET 65535
 
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <resolv.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/ip_icmp.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include<sys/wait.h>
+#pragma pack(1)
 
-#define PACKETSIZE	64
-struct packet
+struct ip
 {
-	struct icmphdr hdr;
-	char msg[PACKETSIZE-sizeof(struct icmphdr)];
+	UINT8   ip_hl : 4;          // length of the header
+	UINT8   ip_v : 4;           // Version of IP
+	UINT8   ip_tos;             // Type of service
+	UINT16  ip_len;             // total length of the packet
+	UINT16  ip_id;              // unique identifier of the flow
+	UINT16  ip_off;				// fragmentation flags
+	UINT8   ip_ttl;             // Time to live
+	UINT8   ip_p;               // protocol (ICMP, TCP, UDP etc)
+	UINT16  ip_sum;             // IP checksum
+	UINT32  ip_src;
+	UINT32  ip_dst;
 };
 
-int pid=-1;
-struct protoent *proto=NULL;
+struct icmp
+{
+	UINT8  icmp_type;
+	UINT8  icmp_code;      // type sub code
+	UINT16 icmp_cksum;
+	UINT16 icmp_id;
+	UINT16 icmp_seq;
+	UINT32 icmp_data;      // time data
+};
 
-/*--------------------------------------------------------------------*/
-/*--- checksum - standard 1s complement checksum                   ---*/
-/*--------------------------------------------------------------------*/
-unsigned short checksum(void *b, int len)
-{	unsigned short *buf = b;
-	unsigned int sum=0;
-	unsigned short result;
+#pragma pack()
 
-	for ( sum = 0; len > 1; len -= 2 )
-		sum += *buf++;
-	if ( len == 1 )
-		sum += *(unsigned char*)buf;
-	sum = (sum >> 16) + (sum & 0xFFFF);
-	sum += (sum >> 16);
-	result = ~sum;
-	return result;
+// MSVC defines this in winsock2.h
+//typedef struct timeval {
+//    long tv_sec;
+//    long tv_usec;
+//} timeval;
+
+int gettimeofday(struct timeval * tp, struct timezone * tzp)
+{
+    // Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
+    static const uint64_t EPOCH = ((uint64_t) 116444736000000000ULL);
+
+    SYSTEMTIME  system_time;
+    FILETIME    file_time;
+    uint64_t    time;
+
+    GetSystemTime( &system_time );
+    SystemTimeToFileTime( &system_time, &file_time );
+    time =  ((uint64_t)file_time.dwLowDateTime )      ;
+    time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+    tp->tv_sec  = (long) ((time - EPOCH) / 10000000L);
+    tp->tv_usec = (long) (system_time.wMilliseconds * 1000);
+    return 0;
 }
 
-/*--------------------------------------------------------------------*/
-/*--- display - present echo info                                  ---*/
-/*--------------------------------------------------------------------*/
-void display(void *buf, int bytes)
-{	int i;
-	struct iphdr *ip = buf;
-	struct icmphdr *icmp = buf+ip->ihl*4;
+#else //  linux
 
-	printf("----------------\n");
-	for ( i = 0; i < bytes; i++ )
-	{
-		if ( !(i & 15) ) printf("\nX:  ", i);
-		printf("X ", ((unsigned char*)buf)[i]);
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <sys/time.h> // gettimeofday()
+#endif
+
+
+ // IPv4 header len without options
+#define IP4_HDRLEN 20
+
+// ICMP header len for echo req
+#define ICMP_HDRLEN 8 
+
+// Checksum algo
+unsigned short calculate_checksum(unsigned short * paddress, int len);
+
+// 1. Change SOURCE_IP and DESTINATION_IP to the relevant
+//     for your computer
+// 2. Compile it using MSVC compiler or g++
+// 3. Run it from the account with administrative permissions,
+//    since opening of a raw-socket requires elevated preveledges.
+//
+//    On Windows, right click the exe and select "Run as administrator"
+//    On Linux, run it as a root or with sudo.
+//
+// 4. For debugging and development, run MS Visual Studio (MSVS) as admin by
+//    right-clicking at the icon of MSVS and selecting from the right-click 
+//    menu "Run as administrator"
+//
+//  Note. You can place another IP-source address that does not belong to your
+//  computer (IP-spoofing), i.e. just another IP from your subnet, and the ICMP
+//  still be sent, but do not expect to see ICMP_ECHO_REPLY in most such cases
+//  since anti-spoofing is wide-spread.
+
+#define SOURCE_IP "192.168.1.18"
+// i.e the gateway or ping to google.com for their ip-address
+#define DESTINATION_IP "192.168.1.1"
+
+int main ()
+{
+    struct ip iphdr; // IPv4 header
+    struct icmp icmphdr; // ICMP-header
+    char data[IP_MAXPACKET] = "This is the ping.\n";
+
+    int datalen = strlen(data) + 1;
+    //===================
+    // ICMP header
+    //===================
+
+    // Message Type (8 bits): ICMP_ECHO_REQUEST
+    icmphdr.icmp_type = ICMP_ECHO;
+
+    // Message Code (8 bits): echo request
+    icmphdr.icmp_code = 0;
+
+    // Identifier (16 bits): some number to trace the response.
+    // It will be copied to the response packet and used to map response to the request sent earlier.
+    // Thus, it serves as a Transaction-ID when we need to make "ping"
+    icmphdr.icmp_id = 18; // hai
+
+    // Sequence Number (16 bits): starts at 0
+    icmphdr.icmp_seq = 0;
+
+    // ICMP header checksum (16 bits): set to 0 not to include into checksum calculation
+    icmphdr.icmp_cksum = 0;
+
+    // Combine the packet 
+    char packet[IP_MAXPACKET];
+
+    // First, IP header.
+    memcpy (packet, &iphdr, IP4_HDRLEN);
+
+    // Next, ICMP header
+    memcpy ((packet + IP4_HDRLEN), &icmphdr, ICMP_HDRLEN);
+
+    // After ICMP header, add the ICMP data.
+    memcpy (packet + IP4_HDRLEN + ICMP_HDRLEN, data, datalen);
+
+    // Calculate the ICMP header checksum
+    icmphdr.icmp_cksum = calculate_checksum((unsigned short *) (packet + IP4_HDRLEN), ICMP_HDRLEN + datalen);
+    memcpy ((packet + IP4_HDRLEN), &icmphdr, ICMP_HDRLEN);
+
+    struct sockaddr_in dest_in;
+    memset (&dest_in, 0, sizeof (struct sockaddr_in));
+    dest_in.sin_family = AF_INET;
+
+    // The port is irrelant for Networking and therefore was zeroed.
+#if defined _WIN32
+    dest_in.sin_addr.s_addr = iphdr.ip_dst;
+#else
+    dest_in.sin_addr.s_addr = iphdr.ip_dst.s_addr;
+#endif
+    
+
+#if defined _WIN32
+	WSADATA wsaData = { 0 };
+	int iResult = 0;
+
+	// Initialize Winsock
+	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (iResult != 0) {
+		printf("WSAStartup failed: %d\n", iResult);
+		return 1;
 	}
-	printf("\n");
-	printf("IPv%d: hdr-size=%d pkt-size=%d protocol=%d TTL=%d src=%s ",
-		ip->version, ip->ihl*4, ntohs(ip->tot_len), ip->protocol,
-		ip->ttl, inet_ntoa(ip->saddr));
-	printf("dst=%s\n", inet_ntoa(ip->daddr));
-	if ( icmp->un.echo.id == pid )
-	{
-		printf("ICMP: type[%d/%d] checksum[%d] id[%d] seq[%d]\n",
-			icmp->type, icmp->code, ntohs(icmp->checksum),
-			icmp->un.echo.id, icmp->un.echo.sequence);
-	}
+#endif
+
+    // Create raw socket for IP-RAW (make IP-header by yourself)
+    int sock = -1;
+    if ((sock = socket (AF_INET, SOCK_RAW, IPPROTO_ICMP)) == -1) 
+    {
+        fprintf (stderr, "socket() failed with error: %d"
+#if defined _WIN32
+			, WSAGetLastError()
+#else
+			, errno
+#endif
+			);
+        fprintf (stderr, "To create a raw socket, the process needs to be run by Admin/root user.\n\n");
+        return -1;
+    }
+
+    // Send the packet using sendto() for sending datagrams.
+    if (sendto (sock, packet, IP4_HDRLEN + ICMP_HDRLEN + datalen, 0, (struct sockaddr *) &dest_in, sizeof (dest_in)) == -1)  
+    {
+        fprintf (stderr, "sendto() failed with error: %d"
+#if defined _WIN32
+			, WSAGetLastError()
+#else
+			, errno
+#endif
+			);
+        return -1;
+    }
+
+  // Close the raw socket descriptor.
+#if defined _WIN32
+  closesocket(sock);
+  WSACleanup();
+#else
+  close(sock);
+#endif
+
+  return 0;
 }
 
-/*--------------------------------------------------------------------*/
-/*--- listener - separate process to listen for and collect messages--*/
-/*--------------------------------------------------------------------*/
-void listener(void)
-{	int sd;
-	struct sockaddr_in addr;
-	unsigned char buf[1024];
+// Compute checksum (RFC 1071).
+unsigned short calculate_checksum(unsigned short * paddress, int len)
+{
+	int nleft = len;
+	int sum = 0;
+	unsigned short * w = paddress;
+	unsigned short answer = 0;
 
-	sd = socket(PF_INET, SOCK_RAW, proto->p_proto);
-	if ( sd < 0 )
+	while (nleft > 1)
 	{
-		perror("socket");
-		exit(0);
+		sum += *w++;
+		nleft -= 2;
 	}
-	for (;;)
-	{	int bytes, len=sizeof(addr);
 
-		bzero(buf, sizeof(buf));
-		bytes = recvfrom(sd, buf, sizeof(buf), 0, (struct sockaddr*)&addr, &len);
-		if ( bytes > 0 )
-			display(buf, bytes);
-		else
-			perror("recvfrom");
+	if (nleft == 1)
+	{
+		*((unsigned char *)&answer) = *((unsigned char *)w);
+		sum += answer;
 	}
-	exit(0);
+
+	// add back carry outs from top 16 bits to low 16 bits
+	sum = (sum >> 16) + (sum & 0xffff); // add hi 16 to low 16
+	sum += (sum >> 16);                 // add carry
+	answer = ~sum;                      // truncate to 16 bits
+
+	return answer;
 }
 
-/*--------------------------------------------------------------------*/
-/*--- ping - Create message and send it.                           ---*/
-/*--------------------------------------------------------------------*/
-void ping(struct sockaddr_in *addr)
-{	const int val=255;
-	int i, sd, cnt=1;
-	struct packet pckt;
-	struct sockaddr_in r_addr;
-
-	sd = socket(PF_INET, SOCK_RAW, proto->p_proto);
-	if ( sd < 0 )
-	{
-		perror("socket");
-		return;
-	}
-	if ( setsockopt(sd, SOL_IP, IP_TTL, &val, sizeof(val)) != 0)
-		perror("Set TTL option");
-	if ( fcntl(sd, F_SETFL, O_NONBLOCK) != 0 )
-		perror("Request nonblocking I/O");
-	for (;;)
-	{	int len=sizeof(r_addr);
-
-		printf("Msg #%d\n", cnt);
-		if ( recvfrom(sd, &pckt, sizeof(pckt), 0, (struct sockaddr*)&r_addr, &len) > 0 )
-			printf("***Got message!***\n");
-		bzero(&pckt, sizeof(pckt));
-		pckt.hdr.type = ICMP_ECHO;
-		pckt.hdr.un.echo.id = pid;
-		for ( i = 0; i < sizeof(pckt.msg)-1; i++ )
-			pckt.msg[i] = i+'0';
-		pckt.msg[i] = 0;
-		pckt.hdr.un.echo.sequence = cnt++;
-		pckt.hdr.checksum = checksum(&pckt, sizeof(pckt));
-		if ( sendto(sd, &pckt, sizeof(pckt), 0, (struct sockaddr*)addr, sizeof(*addr)) <= 0 )
-			perror("sendto");
-		sleep(1);
-	}
-}
-
-/*--------------------------------------------------------------------*/
-/*--- main - look up host and start ping processes.                ---*/
-/*--------------------------------------------------------------------*/
-int main(int count, char *strings[])
-{	struct hostent *hname;
-	struct sockaddr_in addr;
-
-	if ( count != 2 )
-	{
-		printf("usage: %s <addr>\n", strings[0]);
-		exit(0);
-	}
-	if ( count > 1 )
-	{
-		pid = getpid();
-		proto = getprotobyname("ICMP");
-		hname = gethostbyname(strings[1]);
-		bzero(&addr, sizeof(addr));
-		addr.sin_family = hname->h_addrtype;
-		addr.sin_port = 0;
-		addr.sin_addr.s_addr = *(long*)hname->h_addr;
-		if ( fork() == 0 )
-			listener();
-		else
-			ping(&addr);
-		wait(0);
-	}
-	else
-		printf("usage: myping <hostname>\n");
-	return 0;
-}
