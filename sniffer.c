@@ -69,7 +69,7 @@ int main()
   char filter_exp[] = "ip proto icmp";
   bpf_u_int32 net;
 
-  // Step 1: Open live pcap session on NIC with name eth3
+  // Step 1: Open live pcap session on NIC with name enp0s3
   handle = pcap_open_live("enp0s3", BUFSIZ, 1, 1000, errbuf); 
   if (handle == NULL) {
     fprintf(stderr, "Can't open eth3: %s\n", errbuf);
